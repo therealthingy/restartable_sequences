@@ -92,10 +92,11 @@ block:
 }
 
 
-// This is a MPSC ring-buffer implementation
-//   -> The consumer (which uses `rb_poll`) thus doesn't need to be protected
-//      against preemption using RSEQ (as there's only 1 consumer anyways)
-//   -> RSEQ would be necessity though in a MPMC implementation
+/* This is a MPSC ring-buffer implementation
+ *   -> The consumer (which uses `rb_poll`) thus doesn't need to be protected
+ *      against preemption using RSEQ (as there's only 1 consumer anyways)
+ *   -> RSEQ would be necessity though in a MPMC implementation
+ */
 int rb_poll(struct rb_item** const item_ptr,
                const unsigned int cpu) {
     struct rb* const rb_ptr = (struct rb*)((uintptr_t)g_rb_baseptr + sizeof(*g_rb_baseptr) * cpu);
