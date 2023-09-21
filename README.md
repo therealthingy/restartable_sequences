@@ -15,7 +15,7 @@ The following paragraphs focus on the latter use case (which also relies on the 
 * Introducing synchronization in a highly parallel application can however result in **high contention** (= many threads block and try to acquire the lock which deteriorates performance)
 * A popular approach of **reducing contention** is the use of **per-CPU data structures**
 
-* Example of a (per-CPU data structure): [**Multi-Producer, Single-Consumer (MPSC) ring buffer** implementation](examples/rseq_rb_demo.c)
+* Example of a (per-CPU data structure): [**Multi-Producer, Single-Consumer (MPSC) ring buffer** implementation](examples/mpsc_rb_demo.c)
   * Supported operations (of the data structure):
     * *Offering*:
       * Inserts a new item
@@ -179,7 +179,7 @@ The following paragraphs focus on the latter use case (which also relies on the 
   * ***CS descriptor***: `struct` **describing the *critical section***
     * This includes e.g., where the CS starts & ends  (see Ex. down below)
 
-  * Example: [MPSC ring buffer]((examples/rseq_rb_demo.c)) (in C-like pseudolanguage for better intelligibility):
+  * Example: [MPSC ring buffer]((examples/rseq_mpsc_rb_demo.c)) (in C-like pseudolanguage for better intelligibility):
     * Critical section (this includes only the pseudocode after `start:`):
       ![CS: Ring buffer offer example](_assets/rb-ex-cs.png)
     * Attendant descriptor of CS  (describing the ):

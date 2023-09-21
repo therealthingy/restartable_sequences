@@ -2,13 +2,12 @@
  * Very simple RSEQ MPSC ring-buffer demo
  *   WORKS ONLY ON amd64 !
  */
-#include <rseq/rseq.h>
-
 #include <stdio.h>
 #include <stdlib.h>
-#include <myheaders/preproc.h>      // Must be installed system-wide
-#include <myheaders/error.h>
-#include <myheaders/os.h>
+
+#include <rseq/rseq.h>      // Librseq
+
+#include <common.h>         // rpmalloc
 
 
 // --  Data structures  --
@@ -22,7 +21,7 @@ struct rb {
                   tail;
     struct rb_item* buf[RB_CAPACITY_ITEMS];           //TODO: Mention in text that this implementation holds pointers (instead of the items themselves)
 };
-#define RB_CAPACITY_BYTES  SIZE_OF_STRUCT_MEMBER(struct rb, buf)
+#define RB_CAPACITY_BYTES  sizeof(((struct rb*)0)->buf)
 _Static_assert( RB_CAPACITY_BYTES && ( (RB_CAPACITY_BYTES & -RB_CAPACITY_BYTES) == RB_CAPACITY_BYTES), "Not a power of 2" );
 
 // --  Globals  --
@@ -116,7 +115,7 @@ int rb_poll(struct rb_item** const item_ptr,
 
 
 
-// --------------------- --------------------- ---------------------  TEST DRIVER  --------------------- --------------------- ---------------------
+// --------------------- ---------------------  TEST DRIVER  --------------------- ---------------------
 int main(void) {
 #define TEST_ASSERT(TRUTH, MSG_FMT, ...) do { \
     if (! (TRUTH) ) { \
