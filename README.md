@@ -150,6 +150,7 @@ The following paragraphs focus on the latter use case (which relies on the first
         * migration to another CPU
         * unmasked / non-maskable signals or
         * preemption
+
     * Limitations (of CS):
       * Consist of **two stages**:
         * *Preparatory* stage:
@@ -178,8 +179,8 @@ The following paragraphs focus on the latter use case (which relies on the first
   * ***CS descriptor***: `struct` **describing the *critical section***
     * This includes e.g., where the CS starts and ends  (see Ex. down below)
 
-  * Example: MPSC ring buffer (in C-like pseudolanguage for better intelligibility):
-    * Critical section (this includes only the pseudocode after `start:`):
+  * Example: MPSC ring buffer (in C-like pseudocode for better intelligibility):
+    * <span id="rseq-ex-cs">Critical section (this includes only the pseudocode after `start:`):</span>
       ![CS: Ring buffer offer example](_assets/rb-ex-cs.png)
     * Attendant descriptor of CS:
       ```C
@@ -193,7 +194,7 @@ The following paragraphs focus on the latter use case (which relies on the first
       ```
 
 * Lifecycle / USAGE:
-  * To initiate a RSEQ, `struct rseq`'s `rseq_cs` is set to the CS
+  * To 'start' a RSEQ, `struct rseq`'s `rseq_cs` is set to the CS descriptor
   * Scheduler check:
     ![RSEQ: (Simplified) scheduler check](_assets/rseq-simplified_restart_check.png)
     * Note that the diagram has been simplified (the [`RSEQ_SIG` security check](https://github.com/torvalds/linux/blob/f7b01bb0b57f994a44ea6368536b59062b796381/kernel/rseq.c#L194) e.g., has been omitted)
@@ -204,17 +205,14 @@ The following paragraphs focus on the latter use case (which relies on the first
       This is automatically handled by the kernel by [setting the IP to `abort_ip`](https://github.com/torvalds/linux/blob/f7b01bb0b57f994a44ea6368536b59062b796381/kernel/rseq.c#L300), which is the address of the first instruction in the abort handler.
 
 
-## Example: Ring Buffer `offer`ing operation
-................................................
+## RSEQ asm basics
+* As already mentioned, CSs are typically implemented using inline assembly.
+  This necessitates a basic understanding of gcc's inline asm syntax.
 
-
-
-
-
-### RSEQ ASM basics
-* The C language doesn't have a standardized syntax for including assembler in C source files.
+* Note that the C language doesn't have a standardized syntax for including assembler in C source files.
   Its inclusion in the compiler is considered an extension to the C language.
-* The *gcc extended asm syntax* is best suitable for mixing C and assembly (as it supports input- and output operands in the form of C variables and jumps to C labels):
+
+* The *gcc extended asm syntax* (which will be used in this example) is best suitable for mixing C and assembly (as it supports input- and output operands in the form of C variables and jumps to C labels):
   ```C
   asm asm-qualifiers ( AssemblerTemplate
                         : OutputOperands
@@ -222,6 +220,124 @@ The following paragraphs focus on the latter use case (which relies on the first
                         : Clobbers
                         : GotoLabels)
   ```
+
+  * Relevant `asm-qualifiers` for RSEQ CSs are `volatile` and `goto`:
+    * `volatile` is required for asm statements which don't use output operands and instead produce the desired result by performing side effects.
+      E.g., the CS of the `offer`ing operation takes a reference to the ring buffer as input operand.
+      It then writes the new item into its buffer and updates the head.
+      Hence, the memory referenced by the input operand is manipulated to produce the desired result.
+      The gcc optimizer may discard the asm statement, which is prevented by this keyword.
+      It also prevents reordering of statements by the compiler.
+    * `goto` allows the asm statement to perform a jump to any C label in the `GotoLabels` list.
+      The CS `offer`ing operation may use such a jump to block in case the ring buffer is full and return an appropriate error code to the caller.
+
+  * `AssemblerTemplate` contains the actual assembly instructions and assembler directives as a string literal.
+     It's a template which may contain tokens. These tokens refer to e.g., operands and goto labels and need to be replaced by the compiler.
+     Once replaced, it's passed to the assembler, i.e., [g]as (GNU Assembler), which produces the machine code.
+     Gcc supports both Intel- and [AT&T](#at&t-syntax) x86 assembler dialects with the latter being the default.
+
+  * `InputOperands` are separated using a comma:
+    ```C
+    [ [asmSymbolicName] ] constraint (cexpression)
+    ```
+    * This allows passing a `cexpression` to the `AssemblerTemplate`, which then can be referenced via the symbolic name `asmSymbolicName`.
+      * A `cexpression` may be a C variable or expression.
+    * `constraint` specifies where the parameter should be placed by gcc. Common constraints are
+      * `m` for *memory*,
+      * `r` for a *general-purpose register* and
+      * `i` for *immediate integer operands* whose value is known during assembly time.
+    * `Clobbers` lists all locations, such as used scratch registers, which are modified by the assembly.
+       This causes the compiler to exempt the listed locations when e.g., choosing registers for the `InputOperands`.
+       The `flags` register is listed using the special clobber `cc`.
+       In case memory is read and written by the assembly, the special clobber memory must be used, which effectively forms a memory barrier for the compiler.
+       More specifically, “cached” memory writes in registers must be flushed to memory by the compiler before the asm statement.
+       This ensures that memory has the latest values.
+       Loads of clobbered memory locations after the asm statement require a reload by the compiler, as they might have been changed.
+    * `GotoLabels` lists all C labels to which the assembly might jump to. This however requires the `goto` qualifier.
+
+* Assembler directives are prefixed with a dot (`.`, e.g., `.popsection`)
+
+* The example will use the AT&T syntax (in the `AssemblerTemplate`), which has these relevant traits:
+  * Immediate operands are prefixed with `$`, whereas registers are prefixed with `%`
+  * Instruction mnemonics follow the order `source, destination`. This only pertains to mnemonics with two operands.
+  * Instruction mnemonics are typically suffixed with a character indicating the size of the operands. Common suffixes are
+    * `b` for byte (8 bit),
+    * `w` for word (16 bit),
+    * `l` for long (32 bit) and
+    * `q` for quadruple word (64 bit).
+
+
+## [Librseq](https://github.com/compudj/librseq)
+.............................................................................
+
+
+## Examples
+### Per-CPU MPSC ring buffer
+* The rb is defined as a global data structure which is allocated during program startup:
+  ```C
+  struct rb* rb_baseptr;                                            // Global var
+
+  int main(void) {
+    rb_baseptr = malloc(get_ncpus() * sizeof(*rb_baseptr));         // Alloc global structure during startup
+    // …
+  }
+  ```
+
+* Operations:
+  * `poll`:
+    * As there's only one consumer (Single-Producer implementation), there's no need for a RSEQ CS
+    * (The implementation can be found here  TODO)
+  * `offer`ing:
+    * As there are a multiple producers (Multi-Producer implementation), we have to guard the operation via a RSEQ CS
+    * Pseudocode for better intelligibility (as [already shown above](#rseq-ex-cs)):
+      ```C
+      int rb_offer(void* item) {                                        // Arg `item_ptr` = Item to be added
+        // -  Index into per-CPU data structure
+        const unsigned int cpu = rseq.mm_cid;                           // Read current HW thread from `struct rseq`
+        struct rb* rb_ptr = (rb_baseptr + sizeof(*rb_baseptr) * cpu);   // Get rb for the HW thread on which this SW thread is currently executing on
+
+        // -  Register CS by setting the CS descriptor in `struct rseq`
+        rseq.rseq_cs = &descriptor;
+
+        // -  BEGIN CS  -
+      start:                                                            // Begin of CS
+        // Check whether the current 'HW thread' still matches the previously used `cpu` (which was used for indexing)
+        if (rseq.mm_cid != cpu) goto abort;
+
+        // - Prepare
+        if (0 == free_slots(rb.head, rb.tail, rb.capacity))             // Check whether ample space is available
+          return -1;
+
+        rb.buf[rb.head % rb.capacity] = item;                           // Copy item into rb
+
+        // - Commit  (by writing new head, which makes copied item visible to consumers)
+        rb.head += sizeof(item);
+      post_commit:                                                      // End of CS
+        // -  END CS  -
+
+        return 0;
+        // -  ABORT HANDLER  -
+      abort:
+        return 1;
+      }
+    ```
+    * (The implementation can be found here  TODO)
+
+
+
+
+..........................................................................
+
+
+
+
+### Memory allocators
+.............................
+
+
+
+
+
 
 
 

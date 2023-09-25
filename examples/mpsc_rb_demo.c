@@ -10,8 +10,11 @@
 #include <common.h>         // Error handling macros, etc.
 
 
-// --  Data structures  --
-#define RB_CAPACITY_ITEMS (1 << 2)
+// --  Data structure  --
+#ifndef RB_CAPACITY_ITEMS
+#  define RB_CAPACITY_ITEMS (1 << 2)
+#endif
+
 struct rb {
     unsigned long head,
                   tail;
@@ -26,9 +29,10 @@ struct rb* g_rb_baseptr;
 
 
 // --  Operations  --
-static inline int rb_offer(void* const item_ptr,
-                           const unsigned int cpu) {
-    struct rb* const rb_ptr = (struct rb*)((uintptr_t)g_rb_baseptr + sizeof(*g_rb_baseptr) * cpu);  // Get rb for the HW thread on which this SW thread is currently executing on
+static inline int rb_offer(void* const item_ptr) {
+    // -  Index into per-CPU data structure (using the HW thread on which this SW thread is currently executing on) to get the data structure for the current HW thread
+    const unsigned int cpu = rseq_current_mm_cid();
+    struct rb* const rb_ptr = (struct rb*)((uintptr_t)g_rb_baseptr + sizeof(*g_rb_baseptr) * cpu);
 
     __asm__ __volatile__ goto (
         // (Librseq macro producing) ASM DIRECTIVES which emit the CS descriptor for the ensuing CS in an ELF section
@@ -49,7 +53,7 @@ static inline int rb_offer(void* const item_ptr,
                             RSEQ_ASM_TP_SEGMENT:RSEQ_MM_CID_OFFSET(%[rseq_offset]),  /* `mm_cid` in `struct rseq` (contains current 'HW thread') */
                             4f)                             /* Forward reference to abort handler (`abort_ip`) which will be invoked if no match */
 
-        // -  BEGIN ACTUAL CS  -
+        // -  BEGIN CS  -
         // - Prepare  (copy item)
         // Check whether ample space is available
         "movq   %c[rb_off_tail](%[rb_ptr]),  %%rax\n\t"
@@ -69,7 +73,7 @@ static inline int rb_offer(void* const item_ptr,
         "movq   %[item_ptr],                 (%%rbx)\n\t"
 
         "addq   $%c[item_ptr_size],          %%rax\n\t"     // ( rax = NEXT head )
-        // - Commit  (by writing new head, which makes copied item visible 2 consumers)
+        // - Commit  (by writing new head, which makes copied item visible to consumers)
         "movq    %%rax,                      %c[rb_off_head](%[rb_ptr])\n\t"
         "2:\n\t"                                            // Local label indicating end of CS (used for defining CS descriptor)
 
@@ -102,15 +106,15 @@ block:
 }
 
 
-/* This is a MPSC rb implementation
- *   -> The consumer (which uses `rb_poll`) thus doesn't need to be protected
- *      against preemption using RSEQ (as there's only 1 consumer anyways)
- *   -> RSEQ would be necessity though in a MPMC implementation
- */
-int rb_poll(void** const item_ptr,
-               const unsigned int cpu) {
+int rb_poll(void** const item_ptr) {
+    const unsigned int cpu = rseq_current_mm_cid();
     struct rb* const rb_ptr = (struct rb*)((uintptr_t)g_rb_baseptr + sizeof(*g_rb_baseptr) * cpu);
 
+    /* NOTE: This is a MPSC rb implementation
+     *   -> The consumer (which uses `rb_poll`) thus doesn't need to be protected
+     *      against preemption using RSEQ (as there's only 1 consumer anyways)
+     *   -> RSEQ would be necessity though in a MPMC implementation
+     */
     if (rb_ptr->head > rb_ptr->tail) {
         const int idx = (rb_ptr->tail & (RB_CAPACITY_BYTES - 1)) / sizeof(rb_ptr->buf[0]);
         *item_ptr = rb_ptr->buf[idx];
@@ -147,7 +151,7 @@ int main(void) {
 
 // consumer shouldn't overtake producer
 {   struct rb_item *polled_item = NULL; int rc;
-    while ( 1 == (rc = rb_poll((void*)&polled_item, rseq_current_mm_cid())) ) {
+    while ( 1 == (rc = rb_poll((void*)&polled_item)) ) {
         fprintf(stderr, "rseq failed\n");
     }
     TEST_ASSERT( -1 == rc, "`rb_poll` rc must be -1" );
@@ -158,13 +162,13 @@ int main(void) {
         struct rb_item* offered_item = DIE_WHEN_ERRNO_VPTR( malloc( sizeof(*offered_item) ) );
         offered_item->val = i;
         int rc;
-        while ( 1 == (rc = rb_offer((void*)offered_item, rseq_current_mm_cid())) ) {
+        while ( 1 == (rc = rb_offer((void*)offered_item)) ) {
             fprintf(stderr, "rseq failed\n");
         }
         TEST_ASSERT( 0 == rc, "`rb_offer` rc must be 0" );
 
         struct rb_item *polled_item = NULL;
-        while ( 1 == (rc = rb_poll((void*)&polled_item, rseq_current_mm_cid())) ) {
+        while ( 1 == (rc = rb_poll((void*)&polled_item)) ) {
             fprintf(stderr, "rseq failed\n");
         }
         TEST_ASSERT( 0 == rc, "`rb_poll` rc must be 0" );
@@ -175,7 +179,7 @@ int main(void) {
 // producer should block before lapping consumer
     for (unsigned int i = 0; i <= RB_CAPACITY_ITEMS; ++i) {
         int rc;
-        while ( 1 == (rc = rb_offer((void*)NULL, rseq_current_mm_cid())) ) {
+        while ( 1 == (rc = rb_offer((void*)NULL)) ) {
             fprintf(stderr, "rseq failed\n");
         }
         TEST_ASSERT( ((i < RB_CAPACITY_ITEMS) ? 0 : -1) == rc, "`rb_offer` invalid rc" );
