@@ -1,5 +1,5 @@
 /*
- * Very simple MPSC ring-buffer (rb) demo built using RSEQs
+ * Very simple MPSC ring buffer (rb) demo built using RSEQs
  *   Works atm only on amd64
  */
 #include <stdio.h>
@@ -181,7 +181,7 @@ int main(void) {
         TEST_ASSERT( ((i < RB_CAPACITY_ITEMS) ? 0 : -1) == rc, "`rb_offer` invalid rc" );
     }
 
-    fprintf(stdout, "PASSED tests\n");
+    fprintf(stdout, "PASSED unit tests\n");
 
 
 // finalize

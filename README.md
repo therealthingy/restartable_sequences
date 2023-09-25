@@ -1,12 +1,11 @@
-
-
 # Restartable Sequences (RSEQs)
+
 ## Motivation
 The potential use cases of RSEQs in user space are:
-  * Efficiently retrieving the CPU on which the thread is currently running on, e.g., for indexing in per-CPU data structures
-  * Modifying per-CPU data structures which are protected by spinlocks
+  * Efficiently **retrieving the CPU** on which the thread is currently running on, e.g., for indexing in per-CPU data structures
+  * **Modifying per-CPU data structures** which are protected by spinlocks
 
-The following paragraphs focus on the latter use case (which also relies on the first use case).
+The following paragraphs focus on the latter use case (which relies on the first use case).
 
 
 ### Per-CPU data structures
@@ -15,28 +14,28 @@ The following paragraphs focus on the latter use case (which also relies on the 
 * Introducing synchronization in a highly parallel application can however result in **high contention** (= many threads block and try to acquire the lock which deteriorates performance)
 * A popular approach of **reducing contention** is the use of **per-CPU data structures**
 
-* Example of a (per-CPU data structure): [**Multi-Producer, Single-Consumer (MPSC) ring buffer** implementation](examples/mpsc_rb_demo.c)
+* Example (of a per-CPU data structure): **Multi-Producer, Single-Consumer (MPSC) ring buffer** implementation
   * Supported operations (of the data structure):
     * *Offering*:
       * Inserts a new item
       * Requires the producer to &mldr;
-        * 1.) read the current write position (a.k.a., the *head*),
-        * 2.) write the new item and
-        * 3.) update the head. Updating the head effectively commits the change, making the item visible to the consumer.
+        * (1.) read the current write position (a.k.a., the *head*),
+        * (2.) write the new item and
+        * (3.) update the head. Updating the head effectively commits the change, making the item visible to the consumer.
     * *Polling*:
       * Reads an item
       * Requires the consumer to &mldr;
-        * 1.) read the current read position (a.k.a., the *tail*),
-        * 2.) read the item and
-        * 3.) update the read position.
+        * (1.) read the current read position (a.k.a., the *tail*),
+        * (2.) read the item and
+        * (3.) update the read position.
 
 ### Synchronization when working w/ per-CPU data structures
 * This data structure is "inherently" (as each SW thread running on a HW thread has its own data structure) *thread safe* with respect to parallel access
-* HOWEVER, it's not "inherently" (as long as no synchronization primitive is used) thread safe with respect to other threads running on the same CPU
+* HOWEVER, it's **not** "inherently" (as long as no synchronization primitive is used) thread safe with respect to other threads running on the same CPU
   * Hence, the following sequence of events could occur:
-    * 1.) Producer A finished writing a new item but gets preempted by the OS before it could commit
-    * 2.) Producer B, running on the same CPU, reads the old head, starts overwriting Producer A's uncommitted item and commits its own
-    * 3.) Producer A continues and tries to commit its now overwritten item
+    * (1.) Producer A finished writing a new item but gets preempted by the OS before it could commit
+    * (2.) Producer B, running on the same CPU, reads the old head, starts overwriting Producer A's uncommitted item and commits its own
+    * (3.) Producer A continues and tries to commit its now overwritten item
   * &rarr; Synchronization is thus needed to enforce **atomicity with respect to preemption**
 
 * There are different "approaches" for mitigating this synchronization issue:
@@ -50,14 +49,14 @@ The following paragraphs focus on the latter use case (which also relies on the 
     ```
     * This approach has a few downsides:
       * Performance penalty
-      * ABA problem
+      * [ABA problem](https://en.wikipedia.org/wiki/ABA_problem)
 
   * Disabling preemption altogether while manipulating per-CPU data structures
     * This ability is limited to kernel space
 
   * RSEQs (developed by Paul Turner and Andrew Hunter at Google and Mathieu Desnoyers at EfficiOS)
     * Idea: ***Detect preemption** (with the help of the OS scheduler) and if necessary, restart the preempted operation
-    * RSEQ = the implementation of aforesaid concept in the Linux kernel
+    * *RSEQ* = the implementation of aforesaid concept in the Linux kernel
     * This mechanism has been part of the Linux kernel since version 4.18
 
 
@@ -67,8 +66,8 @@ The following paragraphs focus on the latter use case (which also relies on the 
 * "Lifecycle":
   * Setup:
     * ~~It's the responsibility of each user space thread (which wants to use RSEQs) to:~~
-      * ~~a) allocate the `struct` as a **global TLS variable**~~
-      * ~~b) perform the thread registration using the [RSEQ syscall](#RSEQ-syscall)~~
+      * ~~(a) allocate the `struct` as a **global TLS variable**~~
+      * ~~(b) perform the thread registration using the [RSEQ syscall](#RSEQ-syscall)~~
       This is handled automatically since glibc 2.35  (can be disabled using the [`glibc.pthread.rseq` tunable](https://www.gnu.org/software/libc/manual/html_node/POSIX-Thread-Tunables.html#index-glibc_002epthread_002erseq))
   * Usage:
     * Once registration is complete: Scheduler will update the member fields (which then can be read by the user space thread)
@@ -159,13 +158,13 @@ The following paragraphs focus on the latter use case (which also relies on the 
         * *Commit* stage:
           * Publishes made changes
           * Must consist of a **single atomic instruction**
-      * Must be **written in asm**
+      * Must be **written in [asm](#rseq-asm-basics)**
         The generated machine instructions must faithfully follow the *program order* (as defined in the source).
         This is an issue in high-level languages, as reorders of stores might occur by the compiler (for optimization purposes).
         Such optimizations can change the program order by e.g., preponing the store associated with the commit phase into the preparatory phase.
       * Should **never invoke syscalls**
       * **No function calls**
-        Doing so would move the IP outside the CS, making the detection (whether a CS was active) impossible.
+        Doing so would move the IP (Instruction Pointer) outside the CS, making the detection (whether a CS was active) impossible.
       * Stack operations should be limited to reserved stack space  (e.g., local variables defined in the C code preceding the inline assembly block)
         Pushing elements also requires an attendant undo operation upon exit.
         However, undoing the operation with `pop` could result in stack memory corruption if the CS was interrupted prior to the `push` operation.
@@ -177,12 +176,12 @@ The following paragraphs focus on the latter use case (which also relies on the 
         Debuggers like `gdb` can simply read these sections and skip all CS when single stepping.
 
   * ***CS descriptor***: `struct` **describing the *critical section***
-    * This includes e.g., where the CS starts & ends  (see Ex. down below)
+    * This includes e.g., where the CS starts and ends  (see Ex. down below)
 
-  * Example: [MPSC ring buffer]((examples/rseq_mpsc_rb_demo.c)) (in C-like pseudolanguage for better intelligibility):
+  * Example: MPSC ring buffer (in C-like pseudolanguage for better intelligibility):
     * Critical section (this includes only the pseudocode after `start:`):
       ![CS: Ring buffer offer example](_assets/rb-ex-cs.png)
-    * Attendant descriptor of CS  (describing the ):
+    * Attendant descriptor of CS:
       ```C
       struct rseq_cs descriptor = {
           .version = 0,
@@ -194,29 +193,35 @@ The following paragraphs focus on the latter use case (which also relies on the 
       ```
 
 * Lifecycle / USAGE:
-  * Allocated ……………………………………………………
+  * To initiate a RSEQ, `struct rseq`'s `rseq_cs` is set to the CS
+  * Scheduler check:
+    ![RSEQ: (Simplified) scheduler check](_assets/rseq-simplified_restart_check.png)
+    * Note that the diagram has been simplified (the [`RSEQ_SIG` security check](https://github.com/torvalds/linux/blob/f7b01bb0b57f994a44ea6368536b59062b796381/kernel/rseq.c#L194) e.g., has been omitted)
+    * When scheduling a thread, the Linux scheduler will check whether
+      * (1.) a [CS descriptor has been set in the `rseq_cs` field of `struct rseq`](https://github.com/torvalds/linux/blob/f7b01bb0b57f994a44ea6368536b59062b796381/kernel/rseq.c#L281). If this is the case, the kernel will check whether
+      * (2.) the saved IP address is [falling in the range `start_ip` &le; IP address &lt; `start_ip` + `post_commit_offset`](https://github.com/torvalds/linux/blob/f7b01bb0b57f994a44ea6368536b59062b796381/kernel/rseq.c#L271)
+    * The RSEQ CS must be restarted if this condition also holds true.
+      This is automatically handled by the kernel by [setting the IP to `abort_ip`](https://github.com/torvalds/linux/blob/f7b01bb0b57f994a44ea6368536b59062b796381/kernel/rseq.c#L300), which is the address of the first instruction in the abort handler.
 
 
-* Simplified scheduler check:
-  ![RSEQ: (Simplified) scheduler check](_assets/rseq-simplified_restart_check.png)
-  * When scheduling a thread, the Linux scheduler will check whether
-    * a CS descriptor has been set in the `rseq_cs` field of `struct rseq`
-    * If this is the case, the kernel will check whether the saved IP address is falling in the range `start_ip` &le; IP address &lt; `start_ip` + `post_commit_offset`
-
-
-
-
-
-
-
-
+## Example: Ring Buffer `offer`ing operation
+................................................
 
 
 
 
 
-
-
+### RSEQ ASM basics
+* The C language doesn't have a standardized syntax for including assembler in C source files.
+  Its inclusion in the compiler is considered an extension to the C language.
+* The *gcc extended asm syntax* is best suitable for mixing C and assembly (as it supports input- and output operands in the form of C variables and jumps to C labels):
+  ```C
+  asm asm-qualifiers ( AssemblerTemplate
+                        : OutputOperands
+                        : InputOperands
+                        : Clobbers
+                        : GotoLabels)
+  ```
 
 
 
