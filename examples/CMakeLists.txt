@@ -60,8 +60,8 @@ target_include_directories(librseq SYSTEM INTERFACE ${librseq_SOURCE_DIR}/includ
 
 # --  CMake targets  --
 # -  MPSC ring buffer  -
-add_executable(rb_demo mpsc_rb_demo.c)
-target_link_libraries(rb_demo librseq)
+add_executable(mpsc_rb_demo mpsc_rb_demo.c)
+target_link_libraries(mpsc_rb_demo librseq)
 
 # -  rpmalloc  -
 include(ExternalProject)
