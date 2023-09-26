@@ -35,21 +35,17 @@ static inline int rb_offer(void* const item_ptr) {
     struct rb* const rb_ptr = (struct rb*)((uintptr_t)g_rb_baseptr + sizeof(*g_rb_baseptr) * cpu);
 
     __asm__ __volatile__ goto (
-        // (Librseq macro producing) ASM DIRECTIVES which emit the CS descriptor for the ensuing CS in an ELF section
-        RSEQ_ASM_DEFINE_TABLE(3,                            /* Local label `cs_label` -> Used for referencing this CS descriptor */
-                              1f, 2f,                       /* 'Forward references' defining the field `start_ip` (= start of CS = `1f`) and `post_commit_ip` (= length of CS = `2f` - `1f`) */
-                              4f)                           /* 'Forward reference' defining `abort_ip` (= start address of abort handler) */
-        // (Optional; Librseq macro producing) ASM DIRECTIVES which emit debugging information (may be used by e.g., `gdb`) in an ELF section
-        RSEQ_ASM_DEFINE_EXIT_POINT(1f,                      /* `start_ip` */
-                                   %l[block])               /* exit_ip */
+        // Emit CS descriptor (`struct rseq_cs`) (in an ELF section) for the ensuing CS
+        RSEQ_ASM_DEFINE_TABLE(3, 1f, 2f, 4f)
+        // (Optional) Emit debugging information of RSEQ CS exit points
+        RSEQ_ASM_DEFINE_EXIT_POINT(1f, %l[block])
 
-        // (Librseq macro producing) ASM which registers the CS by setting `rseq_cs` in `struct rseq` to point to the defined CS descriptor  (!!  clobbers rax  !!)
-        RSEQ_ASM_STORE_RSEQ_CS(1,                           /* Local label defining the start of the CS (= `start_ip`) */
-                               3b,                          /* 'Backward reference' to CS descriptor (`cs_label`) */
-                               RSEQ_ASM_TP_SEGMENT:RSEQ_CS_OFFSET(%[rseq_offset]))  /* Field `rseq_cs` in `struct rseq` */
+        // Register the CS
+        RSEQ_ASM_STORE_RSEQ_CS(1, 3b, RSEQ_ASM_TP_SEGMENT:RSEQ_CS_OFFSET(%[rseq_offset]))
 
         // (Librseq macro producing) ASM which checks and aborts when the current 'HW thread' doesn't match the 'HW thread' `cpu`
-        RSEQ_ASM_CMP_CPU_ID(cpu_id,                         /* `cpu` function arg */
+        // Check whether HW thread still matches  (!!  clobbers rax  !!)
+        RSEQ_ASM_CMP_CPU_ID(cpu_id,
                             RSEQ_ASM_TP_SEGMENT:RSEQ_MM_CID_OFFSET(%[rseq_offset]),  /* `mm_cid` in `struct rseq` (contains current 'HW thread') */
                             4f)                             /* Forward reference to abort handler (`abort_ip`) which will be invoked if no match */
 

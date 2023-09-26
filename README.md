@@ -61,6 +61,10 @@ The following paragraphs focus on the latter use case (which relies on the first
 
 
 ## RSEQ ABI
+* The relevant definitions can be found in the header file:
+  * `linux/rseq.h`, provided by [`linux-libc-dev`](https://packages.debian.org/de/sid/linux-libc-dev)  (may include outdated definitions)
+  * `rseq/rseq.h`, provided by [librseq](https://github.com/compudj/librseq/blob/8dd73cf99b9bd3dbbbbe7268088ffd3e66b2e50a/include/rseq/rseq.h)
+
 ### [`struct rseq`](https://github.com/torvalds/linux/blob/f7b01bb0b57f994a44ea6368536b59062b796381/include/uapi/linux/rseq.h#L62)
 * Serves as **kernel- &harr; user space interface** which is used to manage RSEQs in each thread individually
 * "Lifecycle":
@@ -185,11 +189,11 @@ The following paragraphs focus on the latter use case (which relies on the first
     * Attendant descriptor of CS:
       ```C
       struct rseq_cs descriptor = {
-          .version = 0,
-          .flags = 0,
-          .start_ip = &&start,                                                      // Points to first machine instruction in CS
-          .post_commit_offset = (uintptr_t)&&post_commit - (uintptr_t)&&start,      // Length of CS in bytes
-          .abort_ip = &&abort
+        .version = 0,
+        .flags = 0,
+        .start_ip = &&start,                                                      // Points to first machine instruction in CS
+        .post_commit_offset = (uintptr_t)&&post_commit - (uintptr_t)&&start,      // Length of CS in bytes
+        .abort_ip = &&abort
       };
       ```
 
@@ -257,7 +261,13 @@ The following paragraphs focus on the latter use case (which relies on the first
 
 * Assembler directives are prefixed with a dot (`.`, e.g., `.popsection`)
 
-* The example will use the AT&T syntax (in the `AssemblerTemplate`), which has these relevant traits:
+* *Local label*s:
+  * Declaration: `<int>:`, e.g., `1:`
+  * Referencing it &mldr;
+    * after its declaration line requires `b` (“backwards”) as suffix, e.g., `1b`
+    * before its declaration line requires `f` (“forwards”) as suffix, e.g., `1f`
+
+* The [examples](TODO) will use the AT&T syntax (in the `AssemblerTemplate`), which has these relevant traits:
   * Immediate operands are prefixed with `$`, whereas registers are prefixed with `%`
   * Instruction mnemonics follow the order `source, destination`. This only pertains to mnemonics with two operands.
   * Instruction mnemonics are typically suffixed with a character indicating the size of the operands. Common suffixes are
@@ -267,28 +277,82 @@ The following paragraphs focus on the latter use case (which relies on the first
     * `q` for quadruple word (64 bit).
 
 
-## [Librseq](https://github.com/compudj/librseq)
-.............................................................................
+## [Librseq](https://github.com/compudj/librseq) library
+* Makes it easier to integrate RSEQs into applications by offering:
+  * [header file containing the latest RSEQ ABI definitions](https://github.com/compudj/librseq/blob/8dd73cf99b9bd3dbbbbe7268088ffd3e66b2e50a/include/rseq/rseq.h)
+  * functions like
+    * `rseq_register_current_thread`, `rseq_unregister_current_thread`, `rseq_clear_rseq_cs`, `rseq_prepare_unload` for handling the RSEQ lifecycle
+    * `rseq_available`, `rseq_mm_cid_available`, `rseq_node_id_available`, &mldr; for checking which `struct rseq` fields are supported
+    * `rseq_current_cpu_raw`, `rseq_cpu_start`, `rseq_current_mm_cid`, `rseq_current_node_id` for reading `struct rseq` fields
+  * **prewritten CSs** which are supported on many ISAs (thus eliminating portability issues)
+    * E.g., [`rseq_cmpeqv_trymemcpy_storev(intptr_t * v, intptr_t expect, void * dst, void * src, size_t len, intptr_t newv, int cpu)`](https://github.com/compudj/librseq/blob/8dd73cf99b9bd3dbbbbe7268088ffd3e66b2e50a/include/rseq/rseq.h#L400) may be used to implement a MPSC rb, where the producer would pass a pointer to the `head` as `v`, the previously read value of `head` as `expect`, the next index in the buffer as `dst`, a pointer to the item pointer as `src`, the size of the pointer as `len` and the next `head` value as `newv`.
+  * macros `RSEQ_ASM_*` for writing own CSs (thus eliminating boilerplate code):
+    * `RSEQ_ASM_DEFINE_TABLE(<cs_label>, <start_ip>f, <post_commit_ip>f, <abort_ip>f)`:
+      ```C
+      // Expands to ASM DIRECTIVES which emit the CS descriptor (`struct rseq_cs`) for the ensuing CS + debugging information:
+      ".pushsection __rseq_cs, \"aw\"\n\t"
+      ".balign 32\n\t"
+      "<cs_label>:\n\t"                                                         // Local label which will be used for referencing this CS descriptor
+      ".long 0x0, 0x0\n\t"                                                      // `version`, `flags`
+      ".quad <start_ip>f, (<post_commit_ip>f - <start_ip>f), <abort_ip>f\n\t"   // `start_ip`, `post_commit_ip`, `abort_ip`
+      ".popsection\n\t"
+      ".pushsection __rseq_cs_ptr_array, \"aw\"\n\t"                            // Debugging information
+      ".quad 3b\n\t"
+      ".popsection\n\t"
+      ```
+    * `RSEQ_ASM_DEFINE_EXIT_POINT(<start_ip>f, %l[<c_label_exit_point>])`
+      ```C
+      // (Optional) Expands to ASM DIRECTIVES which emit debugging information (may be used by e.g., `gdb`) of RSEQ CS exit points in an ELF section
+      ".pushsection __rseq_exit_point_array, \"aw\"\n\t"
+      ".quad <start_ip>f, %l[<c_label_exit_point>]\n\t"
+      ".popsection\n\t"
+      ```
+    * `RSEQ_ASM_STORE_RSEQ_CS(<start_ip>, <cs_label>b, <struct_rseq_cs_ptr>)`
+      ```C
+      // Expands to ASM which 'registers' the CS by setting `rseq_cs` in `struct rseq` to point to the defined CS descriptor
+      "leaq <cs_label>b(%%rip), %%rax\n\t"                                      // (Uses RIP-relative addressing due to ASLR)
+      "movq %%rax, <struct_rseq_cs_ptr>\n\t"
+      "<start_ip>:\n\t"
+      ```
+    * `RSEQ_ASM_CMP_CPU_ID(<cpu_input_operand>, <struct_rseq_hw_thread>, <abort_ip>f)`
+      ```C
+      // Expands to ASM which checks and aborts when the current 'HW thread' doesn't match the 'HW thread' `cpu`
+      // Only necessary when indexing into the per-CPU data structure OUTSIDE of the CS
+      "cmpl %[<cpu_input_operand>], <struct_rseq_hw_thread>\n\t"
+      "jnz <abort_ip>f\n\t"
+      ```
+    * `RSEQ_ASM_DEFINE_ABORT(<abort_ip>, <teardown>, <c_label_abort>)`
+      ```C
+      ".pushsection __rseq_failure, \"ax\"\n\t"
+      ".byte 0x0f, 0xb9, 0x3d\n\t"                                              // (Documented undefined instruction UD1 which shall trap speculative execution)
+      ".long 0x53053053\n\t"                                                    // RSEQ_SIG (used to thwart binary exploitation attacks)
+      "<abort_ip>:\n\t"
+      "jmp %l[<c_label_abort>]\n\t"
+      ".popsection\n\t"
+      ```
 
 
 ## Examples
 ### Per-CPU MPSC ring buffer
+* The source can be found [here](examples/mpsc_rb_demo.c)
+
 * The rb is defined as a global data structure which is allocated during program startup:
   ```C
   struct rb* rb_baseptr;                                            // Global var
 
   int main(void) {
-    rb_baseptr = malloc(get_ncpus() * sizeof(*rb_baseptr));         // Alloc global structure during startup
+    rb_baseptr = malloc( get_ncpus() * sizeof(*rb_baseptr) );       // Alloc global structure during startup
     // …
   }
   ```
 
 * Operations:
-  * `poll`:
-    * As there's only one consumer (Single-Producer implementation), there's no need for a RSEQ CS
+  * `rb_poll`:
+    * No need for a RSEQ CS, as there's only one consumer (Single-Producer implementation)
     * (The implementation can be found here  TODO)
-  * `offer`ing:
-    * As there are a multiple producers (Multi-Producer implementation), we have to guard the operation via a RSEQ CS
+
+  * `rb_offer`:
+    * Has to be guarded via a RSEQ CS, as there are multiple producers (Multi-Producer implementation)
     * Pseudocode for better intelligibility (as [already shown above](#rseq-ex-cs)):
       ```C
       int rb_offer(void* item) {                                        // Arg `item_ptr` = Item to be added
@@ -321,34 +385,9 @@ The following paragraphs focus on the latter use case (which relies on the first
         return 1;
       }
     ```
-    * (The implementation can be found here  TODO)
-
-
-
-
-..........................................................................
-
-
 
 
 ### Memory allocators
-.............................
-
-
-
-
-
-
-
-
-
-
-
-
-
-
----
-## [Memory allocator prototypes](ccache_protos)
 * These prototypes **utilize RSEQs** to **implement *CPU caches*** (*ccaches*)
 * CPU caches have
   * The ccaches serve as a substitute for *thread caches* (*tcaches*)
