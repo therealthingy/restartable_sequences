@@ -14,7 +14,7 @@ The following paragraphs focus on the latter use case (which relies on the first
 * Introducing synchronization in a highly parallel application can however result in **high contention** (= many threads block and try to acquire the lock which deteriorates performance)
 * A popular approach of **reducing contention** is the use of **per-CPU data structures**
 
-* Example (of a per-CPU data structure): **Multi-Producer, Single-Consumer (MPSC) ring buffer** implementation
+* Example (of a per-CPU data structure): **Multi-Producer, Single-Consumer (MPSC) ring buffer (rb)** implementation
   * Supported operations (of the data structure):
     * *Offering*:
       * Inserts a new item
@@ -29,8 +29,8 @@ The following paragraphs focus on the latter use case (which relies on the first
         * (2.) read the item and
         * (3.) update the read position.
 
-### Synchronization when working w/ per-CPU data structures
-* This data structure is "inherently" (as each SW thread running on a HW thread has its own data structure) *thread safe* with respect to parallel access
+### Synchronizing the access on per-CPU data structures
+* The MPSC rb is "inherently" (as each SW thread running on a HW thread has its own data structure) *thread safe* with respect to parallel access
 * HOWEVER, it's **not** "inherently" (as long as no synchronization primitive is used) thread safe with respect to other threads running on the same CPU
   * Hence, the following sequence of events could occur:
     * (1.) Producer A finished writing a new item but gets preempted by the OS before it could commit
@@ -61,11 +61,12 @@ The following paragraphs focus on the latter use case (which relies on the first
 
 
 ## RSEQ ABI
-* The relevant definitions can be found in the header file:
-  * `linux/rseq.h`, provided by [`linux-libc-dev`](https://packages.debian.org/de/sid/linux-libc-dev)  (may include outdated definitions)
+* The relevant data structure definitions can be found in the header file:
+  * `linux/rseq.h`, provided by [`linux-libc-dev`](https://packages.debian.org/de/sid/linux-libc-dev)  (may contain outdated definitions)
   * `rseq/rseq.h`, provided by [librseq](https://github.com/compudj/librseq/blob/8dd73cf99b9bd3dbbbbe7268088ffd3e66b2e50a/include/rseq/rseq.h)
 
-### [`struct rseq`](https://github.com/torvalds/linux/blob/f7b01bb0b57f994a44ea6368536b59062b796381/include/uapi/linux/rseq.h#L62)
+### `struct rseq`
+* Definition in kernel source tree (as of 6.3): [`include/uapi/linux/rseq.h`](https://github.com/torvalds/linux/blob/f7b01bb0b57f994a44ea6368536b59062b796381/include/uapi/linux/rseq.h#L62)
 * Serves as **kernel- &harr; user space interface** which is used to manage RSEQs in each thread individually
 * "Lifecycle":
   * Setup:
@@ -73,11 +74,16 @@ The following paragraphs focus on the latter use case (which relies on the first
       * ~~(a) allocate the `struct` as a **global TLS variable**~~
       * ~~(b) perform the thread registration using the [RSEQ syscall](#RSEQ-syscall)~~
       This is handled automatically since glibc 2.35  (can be disabled using the [`glibc.pthread.rseq` tunable](https://www.gnu.org/software/libc/manual/html_node/POSIX-Thread-Tunables.html#index-glibc_002epthread_002erseq))
+
+    &rarr; The scheduler will update the member fields once the registration has been complete
+
   * Usage:
-    * Once registration is complete: Scheduler will update the member fields (which then can be read by the user space thread)
+    * A user space thread can &mldr;
+      * obtain information (e.g., on which HW thread it's running) by reading the `struct`
+      * register / unregister a RSEQ *critical section* (*CS*) by writing to the `struct`
     * THINGS TO KEEP IN MIND when accessing the `struct` (after successful registration):
-      * Should be done using a macro like: **`define RSEQ_ACCESS_ONCE(x) (*(__volatile__ __typeof__(x) *)&(x))`**
-        * Necessary as a compiler might optimize out memory reads pertaining `struct rseq` member fields  (the struct is updated externally by the kernel. This happens unbeknownst to the compiler, which assumes the struct never changes, as it's never written to by the user space program)
+      * Should be done via a macro like: **`define RSEQ_ACCESS_ONCE(x) (*(__volatile__ __typeof__(x) *)&(x))`**
+        * Necessary as a compiler might optimize out memory reads pertaining `struct rseq` member fields  (the `struct` is updated externally by the kernel. This happens unbeknownst to the compiler, which might assume that the `struct` never changes, as it may never be written to by the user space thread)
       * NOTE: Program running with a glibc version &ge; 2.35 must take an additional **step of indirection** when accessing `struct rseq`
         * Glibc maintains the registered `struct rseq` within the Thread Control Block (TCB)
           * Accessing it requires adding an offset, exported as [symbol `__rseq_offset`](https://www.gnu.org/software/libc/manual/html_node/Restartable-Sequences.html#index-_005f_005frseq_005foffset), to the thread pointer
@@ -96,44 +102,54 @@ The following paragraphs focus on the latter use case (which relies on the first
   } __attribute__((aligned(4 * sizeof(__u64))));
   ```
 
-  * Fields for e.g., **indexing** in per-CPU data structures:
-    * `cpu_id_start`/`cpu_id`:
-      * Both hold current CPU number on which the registered thread is running on
-        * Range: <pre>0 &le; `cpu_id` &lt; # of CPUs</pre>
-      * They essentially only differ with their init values:
-        * `cpu_id_start` always holds a valid CPU number (even when `struct rseq` hasn't been registered yet)
-        * `cpu_id` is initialized with `-1`
-    * Additions (as of Linux 6.3):
-      * `node_id`:
-        * Initialized with `0`
-        * Holds (once inited) the current NUMA ID
-      * `mm_cid`:
-        * Abbreviation for *memory map concurrency id* (*cid*)
-        * Holds unique, temporarily assigned value, which is allotted by the scheduler to each actively running thread within a process
-          * Range: <pre>0 &le; `mm_cid` &lt; # of actively running threads &le; # of CPUs</pre>
-        * The main beneficiaries of this new field are processes which have fewer threads than cores or which have been restricted to run on fewer cores through scheduler affinity or cgroup cpusets
-          * The cid is closer to `0` (v.s., `cpu_id`), allowing for a more efficient (re-)use of memory when indexing in per-CPU data structures (e.g., in memory allocators)
-  * `rseq_cs`: Pointer to data [structure which **describes the CS** (a.k.a., the *CS descriptor*)](#struct-rseq_cs)
+  * `cpu_id_start`/`cpu_id`:
+    * Both hold current CPU number on which the registered thread is running on
+      * Range: <pre>0 &le; `cpu_id` &lt; # of CPUs</pre>
+    * They essentially only differ with their init values:
+      * `cpu_id_start` always holds a valid CPU number (even when `struct rseq` hasn't been registered yet)
+      * `cpu_id` is initialized with `-1`
+    * Use case:
+      * Get CPU number on which the user space thread is running on (faster than `sched_getcpu`(3))
+      * Index (using the obtained CPU number) in per-CPU data structures
+  * `node_id`:
+    * Initialized with `0`
+    * Holds (once inited) the current NUMA ID
+    * Available on Linux 6.3+
+    * Use case: Same as `cpu_id`, but on the NUMA domain level
+  * `mm_cid`:
+    * Abbreviation for *memory map concurrency id* (*cid*)
+    * Holds unique, temporarily assigned value, which is allotted by the scheduler to each actively running thread within a process
+      * Range: <pre>0 &le; `mm_cid` &lt; # of actively running threads &le; # of CPUs</pre>
+    * Available on Linux 6.3+
+    * Use case: Indexing in per-CPU data structures (`cpu_id` alternative)
+      * Advantage (compared to `cpu_id`): The cid is closer to `0` (v.s., `cpu_id`), allowing for a more efficient (re-)use of memory when indexing in per-CPU data structures (e.g., in [memory allocators](TODO))
+        * The main beneficiaries of this new field are processes which have &mldr;
+          * fewer threads than cores or which have
+          * been restricted to run on fewer cores through scheduler affinity or cgroup cpusets
+  * `rseq_cs`: Pointer to data [structure which **describes the CS** (a.k.a., the *CS descriptor*)](TODO)
   * ~~`flags`: Deprecated as of Linux 6.1~~
 
-### [RSEQ syscall](https://github.com/torvalds/linux/blob/f7b01bb0b57f994a44ea6368536b59062b796381/kernel/rseq.c#L365)
+### RSEQ syscall
+* Implementation in kernel source tree (as of 6.3): [`kernel/rseq.c`](https://github.com/torvalds/linux/blob/f7b01bb0b57f994a44ea6368536b59062b796381/kernel/rseq.c#L365)
 * Registers / unregisters `struct rseq` for invoking thread
-
 * Args of syscall:
   ```C
   SYSCALL_DEFINE4(rseq,             // Taken from Linux 6.3 source tree
-                  struct rseq __user *, rseq,       // Address of allocated `struct rseq`
+                  struct rseq __user *, rseq,
                   u32, rseq_len,                    // Length of structure (tells kernel which `struct rseq` fields need to be updated -- ensures backward compatibility (as the user space program might still use an older definition of the struct, which doesn't include fields like `mm_cid`))
                   int, flags,                       // `0` = perform the registration / `RSEQ_FLAG_UNREGISTER` = unregister already registered struct
                   u32, sig)                         // Used for thwarting binary exploitation attacks
   ```
+    * `rseq`: Address of allocated `struct rseq`
+
 
   * NOTE: As of glibc 2.35, there's no glibc syscall wrapper  (there *shouldn't* be a need anyways, as registration is handled by glibc)
     * Therefore, must be invoked either using the
       * [`syscall` function](https://man7.org/linux/man-pages/man2/syscall.2.html) or
       * inline asm
 
-### [`getauxval`(3)](https://github.com/torvalds/linux/blob/317c8194e6aeb8b3b573ad139fc2a0635856498e/fs/binfmt_elf.c#L292)
+### `getauxval`(3)
+* Implementation in kernel source tree (as of 6.3): [`fs/binfmt_elf.c`](https://github.com/torvalds/linux/blob/317c8194e6aeb8b3b573ad139fc2a0635856498e/fs/binfmt_elf.c#L292)
 * Allows the user space program to detect which feature fields (in `struct rseq`) are supported by the kernel  (e.g., kernels &le; 6.3 don't support the `mm_cid`)
   ```C
   #include <sys/auxv.h>
@@ -145,8 +161,9 @@ The following paragraphs focus on the latter use case (which relies on the first
   const bool mm_cid_is_supported = (int)auxv_rseq_feature_size >= (int)rseq_offsetofend(struct rseq, mm_cid);
   ```
 
-### [`struct rseq_cs`](https://github.com/torvalds/linux/blob/f7b01bb0b57f994a44ea6368536b59062b796381/include/uapi/linux/rseq.h#L45)  (a.k.a., the *CS descriptor*)
-* Difference: *Critical section* (*CS*) v.s., *CS descriptor*:
+### `struct rseq_cs`  (a.k.a., the *CS descriptor*)
+* Definition in kernel source tree (as of 6.3): [`include/uapi/linux/rseq.h`](https://github.com/torvalds/linux/blob/f7b01bb0b57f994a44ea6368536b59062b796381/include/uapi/linux/rseq.h#L45)
+* Difference: *Critical section* v.s., *CS descriptor*:
   * ***Critical section***:
     * The CS itself contains the operations which shall be carried out to modify the per-CPU data structures
     * This CS is **guarded against interruptions** by RSEQ mechanism
@@ -334,8 +351,6 @@ The following paragraphs focus on the latter use case (which relies on the first
 
 ## Examples
 ### Per-CPU MPSC ring buffer
-* The source can be found [here](examples/mpsc_rb_demo.c)
-
 * The rb is defined as a global data structure which is allocated during program startup:
   ```C
   struct rb* rb_baseptr;                                            // Global var
@@ -349,7 +364,6 @@ The following paragraphs focus on the latter use case (which relies on the first
 * Operations:
   * `rb_poll`:
     * No need for a RSEQ CS, as there's only one consumer (Single-Producer implementation)
-    * (The implementation can be found here  TODO)
 
   * `rb_offer`:
     * Has to be guarded via a RSEQ CS, as there are multiple producers (Multi-Producer implementation)
@@ -385,6 +399,7 @@ The following paragraphs focus on the latter use case (which relies on the first
         return 1;
       }
     ```
+    * The actual implementation (which leverages librseq) can be found [here](examples/mpsc_rb_demo.c)
 
 
 ### Memory allocators
