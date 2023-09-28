@@ -1,6 +1,7 @@
 /*
  * Very simple MPSC ring buffer (rb) demo built using RSEQs
- *   Works atm only on amd64
+ *   NOTE: The offer operation uses `mm_cid` for indexing
+ *   Works atm only on GNU/Linux 6.3+ on amd64
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,11 +44,10 @@ static inline int rb_offer(void* const item_ptr) {
         // Register the CS
         RSEQ_ASM_STORE_RSEQ_CS(1, 3b, RSEQ_ASM_TP_SEGMENT:RSEQ_CS_OFFSET(%[rseq_offset]))
 
-        // (Librseq macro producing) ASM which checks and aborts when the current 'HW thread' doesn't match the 'HW thread' `cpu`
-        // Check whether HW thread still matches  (!!  clobbers rax  !!)
+        // Check whether `mm_cid` still matches  (!!  clobbers rax  !!)
         RSEQ_ASM_CMP_CPU_ID(cpu_id,
                             RSEQ_ASM_TP_SEGMENT:RSEQ_MM_CID_OFFSET(%[rseq_offset]),  /* `mm_cid` in `struct rseq` (contains current 'HW thread') */
-                            4f)                             /* Forward reference to abort handler (`abort_ip`) which will be invoked if no match */
+                            4f)                                                      /* Forward reference to abort handler (`abort_ip`) which will be invoked if no match */
 
         // -  BEGIN CS  -
         // - Prepare  (copy item)
@@ -59,7 +59,7 @@ static inline int rb_offer(void* const item_ptr) {
         "cmpq   %%rax,                       %%rbx\n\t"     // Check whether head & tail DON'T "overlap" (i.e., rb isn't full) …
         "movq   %c[rb_off_head](%[rb_ptr]),  %%rax\n\t"     // ( rax = CURRENT head )
         "jne    11f\n\t"                                    // IN CASE they don't overlap: proceed w/ copying
-        "cmpq   %c[rb_off_tail](%[rb_ptr]),  %%rax\n\t"     // OTHERWISE: Check whether head & tail "overlap" due to producer lapping the consumer  (required, otherwise head = tail = 0 would indicate a full rb) …
+        "cmpq   %c[rb_off_tail](%[rb_ptr]),  %%rax\n\t"     // OTHERWISE: Check whether head & tail "overlap" due to producer lapping the consumer  (i.e., head > tail;  required, otherwise head = tail = 0 would indicate a full rb) …
         "jg     %l[block]\n\t"
         "11:\n\t"
 
@@ -73,10 +73,8 @@ static inline int rb_offer(void* const item_ptr) {
         "movq    %%rax,                      %c[rb_off_head](%[rb_ptr])\n\t"
         "2:\n\t"                                            // Local label indicating end of CS (used for defining CS descriptor)
 
-        // (Librseq macro producing) ASM directives for emitting the abort handler "signature" + actual ASM for the abort handler into an eXecutable ELF section
-        RSEQ_ASM_DEFINE_ABORT(4,                            /* Local label referring to start of abort handler (required for defining `abort_ip` in CS descriptor) */
-                              "",                           /* Additional (optional) asm for teardown */
-                              abort)                        /* C label to jump to */
+        // Define abort handler
+        RSEQ_ASM_DEFINE_ABORT(4, "", abort)
 
         :
         : [cpu_id]         "r"   (cpu),

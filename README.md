@@ -30,7 +30,7 @@ The following paragraphs focus on the latter use case (which relies on the first
         * (3.) update the read position.
 
 ### Synchronizing the access on per-CPU data structures
-* The MPSC rb is "inherently" (as each SW thread running on a HW thread has its own data structure) *thread safe* with respect to parallel access
+* The MPSC rb is "inherently" (as each user space thread running on a CPU has its own data structure) *thread safe* with respect to parallel access
 * HOWEVER, it's **not** "inherently" (as long as no synchronization primitive is used) thread safe with respect to other threads running on the same CPU
   * Hence, the following sequence of events could occur:
     * (1.) Producer A finished writing a new item but gets preempted by the OS before it could commit
@@ -51,7 +51,7 @@ The following paragraphs focus on the latter use case (which relies on the first
       * Performance penalty
       * [ABA problem](https://en.wikipedia.org/wiki/ABA_problem)
 
-  * Disabling preemption altogether while manipulating per-CPU data structures
+  * ~~Disabling preemption altogether while manipulating per-CPU data structures~~
     * This ability is limited to kernel space
 
   * RSEQs (developed by Paul Turner and Andrew Hunter at Google and Mathieu Desnoyers at EfficiOS)
@@ -79,7 +79,7 @@ The following paragraphs focus on the latter use case (which relies on the first
 
   * Usage:
     * A user space thread can &mldr;
-      * obtain information (e.g., on which HW thread it's running) by reading the `struct`
+      * obtain information (e.g., on which CPU it's running) by reading the `struct`
       * register / unregister a RSEQ *critical section* (*CS*) by writing to the `struct`
     * THINGS TO KEEP IN MIND when accessing the `struct` (after successful registration):
       * Should be done via a macro like: **`define RSEQ_ACCESS_ONCE(x) (*(__volatile__ __typeof__(x) *)&(x))`**
@@ -112,15 +112,15 @@ The following paragraphs focus on the latter use case (which relies on the first
       * Get CPU number on which the user space thread is running on (faster than `sched_getcpu`(3))
       * Index (using the obtained CPU number) in per-CPU data structures
   * `node_id`:
+    * Available on Linux 6.3+
     * Initialized with `0`
     * Holds (once inited) the current NUMA ID
-    * Available on Linux 6.3+
     * Use case: Same as `cpu_id`, but on the NUMA domain level
   * `mm_cid`:
+    * Available on Linux 6.3+
     * Abbreviation for *memory map concurrency id* (*cid*)
     * Holds unique, temporarily assigned value, which is allotted by the scheduler to each actively running thread within a process
       * Range: <pre>0 &le; `mm_cid` &lt; # of actively running threads &le; # of CPUs</pre>
-    * Available on Linux 6.3+
     * Use case: Indexing in per-CPU data structures (`cpu_id` alternative)
       * Advantage (compared to `cpu_id`): The cid is closer to `0` (v.s., `cpu_id`), allowing for a more efficient (re-)use of memory when indexing in per-CPU data structures (e.g., in [memory allocators](TODO))
         * The main beneficiaries of this new field are processes which have &mldr;
@@ -136,16 +136,19 @@ The following paragraphs focus on the latter use case (which relies on the first
   ```C
   SYSCALL_DEFINE4(rseq,             // Taken from Linux 6.3 source tree
                   struct rseq __user *, rseq,
-                  u32, rseq_len,                    // Length of structure (tells kernel which `struct rseq` fields need to be updated -- ensures backward compatibility (as the user space program might still use an older definition of the struct, which doesn't include fields like `mm_cid`))
-                  int, flags,                       // `0` = perform the registration / `RSEQ_FLAG_UNREGISTER` = unregister already registered struct
-                  u32, sig)                         // Used for thwarting binary exploitation attacks
+                  u32, rseq_len,
+                  int, flags,
+                  u32, sig)
   ```
     * `rseq`: Address of allocated `struct rseq`
-
+    * `rseq_len`: Length of structure
+      * Tells kernel which `struct rseq` fields need to be updated (this ensures backward compatibility, as the user space program might still use an older definition of the `struct`, which doesn't include fields like `mm_cid`)
+    * `flags`: `0` = perform the registration / `RSEQ_FLAG_UNREGISTER` = unregister already registered struct
+    * `sig`: Used for thwarting binary exploitation attacks
 
   * NOTE: As of glibc 2.35, there's no glibc syscall wrapper  (there *shouldn't* be a need anyways, as registration is handled by glibc)
-    * Therefore, must be invoked either using the
-      * [`syscall` function](https://man7.org/linux/man-pages/man2/syscall.2.html) or
+    * Can be invoked manually using the &mldr;
+      * [`syscall` function](https://man7.org/linux/man-pages/man2/syscall.2.html) or &mldr;
       * inline asm
 
 ### `getauxval`(3)
@@ -168,7 +171,7 @@ The following paragraphs focus on the latter use case (which relies on the first
     * The CS itself contains the operations which shall be carried out to modify the per-CPU data structures
     * This CS is **guarded against interruptions** by RSEQ mechanism
       * An active CS may either be interrupted by
-        * migration to another CPU
+        * migration to another CPU,
         * unmasked / non-maskable signals or
         * preemption
 
@@ -208,8 +211,8 @@ The following paragraphs focus on the latter use case (which relies on the first
       struct rseq_cs descriptor = {
         .version = 0,
         .flags = 0,
-        .start_ip = &&start,                                                      // Points to first machine instruction in CS
-        .post_commit_offset = (uintptr_t)&&post_commit - (uintptr_t)&&start,      // Length of CS in bytes
+        .start_ip = &&start,                                                  // Points to first machine instruction in CS
+        .post_commit_offset = (uintptr_t)&&post_commit - (uintptr_t)&&start,  // Length of CS in bytes
         .abort_ip = &&abort
       };
       ```
@@ -228,12 +231,10 @@ The following paragraphs focus on the latter use case (which relies on the first
 
 ## RSEQ asm basics
 * As already mentioned, CSs are typically implemented using inline assembly.
-  This necessitates a basic understanding of gcc's inline asm syntax.
-
 * Note that the C language doesn't have a standardized syntax for including assembler in C source files.
   Its inclusion in the compiler is considered an extension to the C language.
 
-* The *gcc extended asm syntax* (which will be used in this example) is best suitable for mixing C and assembly (as it supports input- and output operands in the form of C variables and jumps to C labels):
+* The *[gcc extended asm syntax](https://gcc.gnu.org/onlinedocs/gcc/Extended-Asm.html)* (which will be used in this example) is best suitable for mixing C and assembly (as it supports input- and output operands in the form of C variables and jumps to C labels):
   ```C
   asm asm-qualifiers ( AssemblerTemplate
                         : OutputOperands
@@ -254,97 +255,107 @@ The following paragraphs focus on the latter use case (which relies on the first
 
   * `AssemblerTemplate` contains the actual assembly instructions and assembler directives as a string literal.
      It's a template which may contain tokens. These tokens refer to e.g., operands and goto labels and need to be replaced by the compiler.
-     Once replaced, it's passed to the assembler, i.e., [g]as (GNU Assembler), which produces the machine code.
+     Once replaced, it's passed to the assembler, which produces the machine code.
      Gcc supports both Intel- and [AT&T](#at&t-syntax) x86 assembler dialects with the latter being the default.
 
-  * `InputOperands` are separated using a comma:
+    * Writing asm:
+      * Assembler directives are prefixed with a dot (`.`, e.g., `.popsection`)
+
+      * *Local label*s:
+        * Declaration: `<int>:`, e.g., `1:`
+        * Referencing it &mldr;
+          * after its declaration line requires `b` (“backwards”) as suffix, e.g., `1b`
+          * before its declaration line requires `f` (“forwards”) as suffix, e.g., `1f`
+
+      * The AT&T syntax has these relevant traits:
+        * Immediate operands are prefixed with `$`, whereas registers are prefixed with `%`
+        * Instruction mnemonics follow the order `source, destination`. This only pertains to mnemonics with two operands.
+        * Instruction mnemonics are typically suffixed with a character indicating the size of the operands. Common suffixes are
+          * `b` for byte (8 bit),
+          * `w` for word (16 bit),
+          * `l` for long (32 bit) and
+          * `q` for quadruple word (64 bit).
+
+  * `InputOperands` are passed as follows:
     ```C
     [ [asmSymbolicName] ] constraint (cexpression)
     ```
-    * This allows passing a `cexpression` to the `AssemblerTemplate`, which then can be referenced via the symbolic name `asmSymbolicName`.
-      * A `cexpression` may be a C variable or expression.
+    * This allows passing a `cexpression` (which may be a C variable or expression) to the `AssemblerTemplate`, which then can be referenced via the symbolic name `asmSymbolicName`
+    * Multiple operands are separated using a comma
     * `constraint` specifies where the parameter should be placed by gcc. Common constraints are
       * `m` for *memory*,
       * `r` for a *general-purpose register* and
       * `i` for *immediate integer operands* whose value is known during assembly time.
-    * `Clobbers` lists all locations, such as used scratch registers, which are modified by the assembly.
-       This causes the compiler to exempt the listed locations when e.g., choosing registers for the `InputOperands`.
-       The `flags` register is listed using the special clobber `cc`.
-       In case memory is read and written by the assembly, the special clobber memory must be used, which effectively forms a memory barrier for the compiler.
-       More specifically, “cached” memory writes in registers must be flushed to memory by the compiler before the asm statement.
-       This ensures that memory has the latest values.
-       Loads of clobbered memory locations after the asm statement require a reload by the compiler, as they might have been changed.
-    * `GotoLabels` lists all C labels to which the assembly might jump to. This however requires the `goto` qualifier.
 
-* Assembler directives are prefixed with a dot (`.`, e.g., `.popsection`)
+  * `Clobbers` lists all locations, such as used scratch registers, which are modified by the assembly.
+     This causes the compiler to exempt the listed locations when e.g., choosing registers for the `InputOperands`.
+     The `flags` register is listed using the special clobber `cc`.
+     In case memory is read and written by the assembly, the special clobber `memory` must be used (which effectively forms a memory barrier for the compiler).
 
-* *Local label*s:
-  * Declaration: `<int>:`, e.g., `1:`
-  * Referencing it &mldr;
-    * after its declaration line requires `b` (“backwards”) as suffix, e.g., `1b`
-    * before its declaration line requires `f` (“forwards”) as suffix, e.g., `1f`
-
-* The [examples](TODO) will use the AT&T syntax (in the `AssemblerTemplate`), which has these relevant traits:
-  * Immediate operands are prefixed with `$`, whereas registers are prefixed with `%`
-  * Instruction mnemonics follow the order `source, destination`. This only pertains to mnemonics with two operands.
-  * Instruction mnemonics are typically suffixed with a character indicating the size of the operands. Common suffixes are
-    * `b` for byte (8 bit),
-    * `w` for word (16 bit),
-    * `l` for long (32 bit) and
-    * `q` for quadruple word (64 bit).
+  * `GotoLabels` lists all C labels to which the assembly might jump to (this requires the previously mentioned `goto` qualifier).
 
 
-## [Librseq](https://github.com/compudj/librseq) library
-* Makes it easier to integrate RSEQs into applications by offering:
-  * [header file containing the latest RSEQ ABI definitions](https://github.com/compudj/librseq/blob/8dd73cf99b9bd3dbbbbe7268088ffd3e66b2e50a/include/rseq/rseq.h)
-  * functions like
+## [Librseq](https://github.com/compudj/librseq)
+* Library which makes it easier to integrate RSEQs into applications by providing:
+  * [Header containing the latest RSEQ ABI definitions](https://github.com/compudj/librseq/blob/8dd73cf99b9bd3dbbbbe7268088ffd3e66b2e50a/include/rseq/rseq.h)
+
+  * Functions like &mldr;
     * `rseq_register_current_thread`, `rseq_unregister_current_thread`, `rseq_clear_rseq_cs`, `rseq_prepare_unload` for handling the RSEQ lifecycle
-    * `rseq_available`, `rseq_mm_cid_available`, `rseq_node_id_available`, &mldr; for checking which `struct rseq` fields are supported
+    * `rseq_available`, `rseq_mm_cid_available`, `rseq_node_id_available`, etc., for checking which `struct rseq` fields are supported
     * `rseq_current_cpu_raw`, `rseq_cpu_start`, `rseq_current_mm_cid`, `rseq_current_node_id` for reading `struct rseq` fields
-  * **prewritten CSs** which are supported on many ISAs (thus eliminating portability issues)
+
+  * **Prewritten CSs** which are supported on many ISAs (thus eliminating portability issues)
     * E.g., [`rseq_cmpeqv_trymemcpy_storev(intptr_t * v, intptr_t expect, void * dst, void * src, size_t len, intptr_t newv, int cpu)`](https://github.com/compudj/librseq/blob/8dd73cf99b9bd3dbbbbe7268088ffd3e66b2e50a/include/rseq/rseq.h#L400) may be used to implement a MPSC rb, where the producer would pass a pointer to the `head` as `v`, the previously read value of `head` as `expect`, the next index in the buffer as `dst`, a pointer to the item pointer as `src`, the size of the pointer as `len` and the next `head` value as `newv`.
-  * macros `RSEQ_ASM_*` for writing own CSs (thus eliminating boilerplate code):
-    * `RSEQ_ASM_DEFINE_TABLE(<cs_label>, <start_ip>f, <post_commit_ip>f, <abort_ip>f)`:
+
+  * Macros `RSEQ_ASM_*` for writing own CSs (thus eliminating boilerplate code):
+    * [`RSEQ_ASM_DEFINE_TABLE(<cs_label>, <start_ip>f, <post_commit_ip>f, <abort_ip>f)`](https://github.com/compudj/librseq/blob/809f5ee3a5f5852e532ee4e406d5e700652b9ab3/include/rseq/rseq-x86.h#L71):
       ```C
-      // Expands to ASM DIRECTIVES which emit the CS descriptor (`struct rseq_cs`) for the ensuing CS + debugging information:
+      // Expands to asm directives which emit the CS descriptor (`struct rseq_cs`)
+      // for the ensuing CS + debugging information:
       ".pushsection __rseq_cs, \"aw\"\n\t"
       ".balign 32\n\t"
-      "<cs_label>:\n\t"                                                         // Local label which will be used for referencing this CS descriptor
-      ".long 0x0, 0x0\n\t"                                                      // `version`, `flags`
-      ".quad <start_ip>f, (<post_commit_ip>f - <start_ip>f), <abort_ip>f\n\t"   // `start_ip`, `post_commit_ip`, `abort_ip`
+      "<cs_label>:\n\t"                                                        // Local label for referencing this CS descriptor
+      ".long 0x0, 0x0\n\t"                                                     // `version`, `flags`
+      ".quad <start_ip>f, (<post_commit_ip>f - <start_ip>f), <abort_ip>f\n\t"  // `start_ip`, `post_commit_ip`, `abort_ip`
       ".popsection\n\t"
-      ".pushsection __rseq_cs_ptr_array, \"aw\"\n\t"                            // Debugging information
+      ".pushsection __rseq_cs_ptr_array, \"aw\"\n\t"                           // Debugging information
       ".quad 3b\n\t"
       ".popsection\n\t"
       ```
-    * `RSEQ_ASM_DEFINE_EXIT_POINT(<start_ip>f, %l[<c_label_exit_point>])`
+    * [`RSEQ_ASM_DEFINE_EXIT_POINT(<start_ip>f, %l[<c_label_exit_point>])`](https://github.com/compudj/librseq/blob/809f5ee3a5f5852e532ee4e406d5e700652b9ab3/include/rseq/rseq-x86.h#L83)
       ```C
-      // (Optional) Expands to ASM DIRECTIVES which emit debugging information (may be used by e.g., `gdb`) of RSEQ CS exit points in an ELF section
+      // (Optional) Expands to asm directives which emit debugging information
+      // (may be used by e.g., `gdb`) of RSEQ CS exit points in an ELF section:
       ".pushsection __rseq_exit_point_array, \"aw\"\n\t"
       ".quad <start_ip>f, %l[<c_label_exit_point>]\n\t"
       ".popsection\n\t"
       ```
-    * `RSEQ_ASM_STORE_RSEQ_CS(<start_ip>, <cs_label>b, <struct_rseq_cs_ptr>)`
+    * [`RSEQ_ASM_STORE_RSEQ_CS(<start_ip>, <cs_label>b, <struct_rseq_cs_ptr>)`](https://github.com/compudj/librseq/blob/809f5ee3a5f5852e532ee4e406d5e700652b9ab3/include/rseq/rseq-x86.h#L88)
       ```C
-      // Expands to ASM which 'registers' the CS by setting `rseq_cs` in `struct rseq` to point to the defined CS descriptor
-      "leaq <cs_label>b(%%rip), %%rax\n\t"                                      // (Uses RIP-relative addressing due to ASLR)
+      // Expands to ASM which 'registers' the CS by setting `rseq_cs`
+      // in `struct rseq` to point to the defined CS descriptor:
+      "leaq <cs_label>b(%%rip), %%rax\n\t"                                     // (Uses RIP-relative addressing due to ASLR)
       "movq %%rax, <struct_rseq_cs_ptr>\n\t"
       "<start_ip>:\n\t"
       ```
-    * `RSEQ_ASM_CMP_CPU_ID(<cpu_input_operand>, <struct_rseq_hw_thread>, <abort_ip>f)`
+    * [`RSEQ_ASM_CMP_CPU_ID(<cpu_input_operand>, <struct_rseq_hw_thread>, <abort_ip>f)`](https://github.com/compudj/librseq/blob/809f5ee3a5f5852e532ee4e406d5e700652b9ab3/include/rseq/rseq-x86.h#L94)
       ```C
-      // Expands to ASM which checks and aborts when the current 'HW thread' doesn't match the 'HW thread' `cpu`
-      // Only necessary when indexing into the per-CPU data structure OUTSIDE of the CS
+      // Expands to asm which checks and aborts when the current `cpu_id` / `mm_cid`
+      // doesn't match `cpu` (only necessary when indexing into the per-CPU data
+      // structure OUTSIDE of the CS):
       "cmpl %[<cpu_input_operand>], <struct_rseq_hw_thread>\n\t"
       "jnz <abort_ip>f\n\t"
       ```
-    * `RSEQ_ASM_DEFINE_ABORT(<abort_ip>, <teardown>, <c_label_abort>)`
+    * [`RSEQ_ASM_DEFINE_ABORT(<abort_ip>, <teardown>, <c_label_abort>)`](https://github.com/compudj/librseq/blob/809f5ee3a5f5852e532ee4e406d5e700652b9ab3/include/rseq/rseq-x86.h#L99)
       ```C
+      // Expands to asm + asm directives for emitting the abort handler
+      // "signature" + instructions into an eXecutable ELF section
       ".pushsection __rseq_failure, \"ax\"\n\t"
-      ".byte 0x0f, 0xb9, 0x3d\n\t"                                              // (Documented undefined instruction UD1 which shall trap speculative execution)
-      ".long 0x53053053\n\t"                                                    // RSEQ_SIG (used to thwart binary exploitation attacks)
-      "<abort_ip>:\n\t"
-      "jmp %l[<c_label_abort>]\n\t"
+      ".byte 0x0f, 0xb9, 0x3d\n\t"                                             // (Documented undefined instruction (UD1) for trapping speculative execution)
+      ".long 0x53053053\n\t"                                                   // `RSEQ_SIG` (used to thwart binary exploitation attacks)
+      "<abort_ip>:\n\t"                                                        // Local label required for defining `abort_ip` in CS descriptor
+      teardown                                                                 // Additional optional asm for teardown
+      "jmp %l[<c_label_abort>]\n\t"                                            // `c_label_abort` = C label to jump to
       ".popsection\n\t"
       ```
 
@@ -360,19 +371,21 @@ The following paragraphs focus on the latter use case (which relies on the first
     // …
   }
   ```
+  ![Ring buffer data structure on quad core system](_assets/rb-ex-data_structure.png)
 
 * Operations:
+  * NOTE: This implementation uses a [power-of-2 size](https://www.kernel.org/doc/html/latest/core-api/circular-buffers.html#measuring-power-of-2-buffers)
   * `rb_poll`:
     * No need for a RSEQ CS, as there's only one consumer (Single-Producer implementation)
 
   * `rb_offer`:
     * Has to be guarded via a RSEQ CS, as there are multiple producers (Multi-Producer implementation)
-    * Pseudocode for better intelligibility (as [already shown above](#rseq-ex-cs)):
+    * Pseudocode for better intelligibility:
       ```C
       int rb_offer(void* item) {                                        // Arg `item_ptr` = Item to be added
         // -  Index into per-CPU data structure
         const unsigned int cpu = rseq.mm_cid;                           // Read current HW thread from `struct rseq`
-        struct rb* rb_ptr = (rb_baseptr + sizeof(*rb_baseptr) * cpu);   // Get rb for the HW thread on which this SW thread is currently executing on
+        struct rb* rb_ptr = (rb_baseptr + sizeof(*rb_baseptr) * cpu);   // Get rb for the CPU on which this thread is currently executing on
 
         // -  Register CS by setting the CS descriptor in `struct rseq`
         rseq.rseq_cs = &descriptor;
@@ -383,13 +396,16 @@ The following paragraphs focus on the latter use case (which relies on the first
         if (rseq.mm_cid != cpu) goto abort;
 
         // - Prepare
-        if (0 == free_slots(rb.head, rb.tail, rb.capacity))             // Check whether ample space is available
-          return -1;
-
-        rb.buf[rb.head % rb.capacity] = item;                           // Copy item into rb
+        // Check whether there's ample space available
+        if ((rb.tail & (RB_CAPACITY_BYTES -1)) == (rb.head & (RB_CAPACITY_BYTES -1))  &&  (rb.head > rb.tail)) {
+          return -1;                                                    // `block`
+        }
+        // Copy item into rb
+        const int idx = (rb_ptr->head & (RB_CAP_BYTES -1)) / sizeof(rb_ptr->buf[0]);
+        rb_ptr->buf[idx] = item;
 
         // - Commit  (by writing new head, which makes copied item visible to consumers)
-        rb.head += sizeof(item);
+        rb_ptr->head += sizeof(rb_ptr->buf[0]);
       post_commit:                                                      // End of CS
         // -  END CS  -
 
@@ -403,8 +419,12 @@ The following paragraphs focus on the latter use case (which relies on the first
 
 
 ### Memory allocators
-* These prototypes **utilize RSEQs** to **implement *CPU caches*** (*ccaches*)
-* CPU caches have
-  * The ccaches serve as a substitute for *thread caches* (*tcaches*)
-* `free`d memory is moved to the ccache corresponding to the CPU on which , where e
+#### Motivation
+* Modern memory allocators (e.g., Google's *tcmalloc* (*Thread-Caching Malloc*)) used ***thread-level caches*** (tcaches) for optimizing performance on multi-core systems
+  * PRO: Reduced lock contention.
+    Each thread can obtain 'cached' memory for allocations from an own thread-local heap (instead of a single global heap).
+    The threads thus don't have to contend for the global lock.
+  * CON: …………
 
+
+* ……………………………………………………………………………………………………………………………………………………………………………………………………………………
