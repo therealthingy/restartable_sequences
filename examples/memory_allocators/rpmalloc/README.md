@@ -1,3 +1,4 @@
+# rpmalloc - General Purpose Memory Allocator
 Prototype DERIVED FROM: https://github.com/mjansson/rpmalloc/commit/39f5cfaa35f73b445d6ec66629ab3963eeb5fa7a
 
 - ADDITIONS / CHANGES:
@@ -6,7 +7,6 @@ Prototype DERIVED FROM: https://github.com/mjansson/rpmalloc/commit/39f5cfaa35f7
   - CPU-level cache
 
 
-# rpmalloc - General Purpose Memory Allocator
 This library provides a public domain cross-platform lock free thread caching 16-byte aligned memory allocator implemented in C.
 The latest source code is always available at https://github.com/mjansson/rpmalloc
   * The latest stable release is available in the `main` branch.

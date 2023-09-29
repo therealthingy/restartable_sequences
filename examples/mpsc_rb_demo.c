@@ -1,7 +1,7 @@
 /*
  * Very simple MPSC ring buffer (rb) demo built using RSEQs
  *   NOTE: The offer operation uses `mm_cid` for indexing
- *   Works atm only on GNU/Linux 6.3+ on amd64
+ *   Works atm only on GNU/Linux 6.3+ for amd64
  */
 #include <stdio.h>
 #include <stdlib.h>
