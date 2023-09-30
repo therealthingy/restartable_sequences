@@ -1,0 +1,31 @@
+name: CI Pipeline [Ubuntu]
+
+on: [push, pull_request]
+
+env:
+  EXAMPLES_BASE_PATH: '${{github.workspace}}/examples'
+  EXAMPLES_BUILD_PATH: '${{github.workspace}}/examples/build'
+
+jobs:
+  examples:
+    name: Build examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      # - Clean (unnecessary ??) + Build -
+      - name: Cleanup
+        shell: bash
+        run: rm -rf $EXAMPLES_BUILD_PATH
+
+      - name: Create Build Environment
+        shell: bash
+        run: cmake -E make_directory $EXAMPLES_BUILD_PATH
+
+      - name: Configure CMake
+        shell: bash
+        run: cmake -B $EXAMPLES_BUILD_PATH -S $EXAMPLES_BASE_PATH -DRSEQ_USE_CID=OFF
+
+      - name: Build w/ CMake
+        shell: bash
+        run: make -C $EXAMPLES_BUILD_PATH -j
