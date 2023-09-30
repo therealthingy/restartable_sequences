@@ -12,5 +12,5 @@
 
 * Out-of-source build:
   1. `mkdir build && cd build`
-  2. `cmake ..`
+  2. `cmake -DRSEQ_USE_CID=OFF ..` (or `ON` if target system uses Linux 6.3.0+)
   3. `make -j`

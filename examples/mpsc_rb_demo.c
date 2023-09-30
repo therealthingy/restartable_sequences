@@ -16,6 +16,17 @@
 #  define RB_CAPACITY_ITEMS (1 << 2)
 #endif
 
+#ifndef RSEQ_USE_CID
+#  define RSEQ_USE_CID 0
+#endif
+#if RSEQ_USE_CID
+#  define RSEQ_CPU_ID_FIELD_OFFSET RSEQ_MM_CID_OFFSET
+#  define RSEQ_GET_INDEX()         rseq_current_mm_cid()
+#else
+#  define RSEQ_CPU_ID_FIELD_OFFSET RSEQ_CPU_ID_OFFSET
+#  define RSEQ_GET_INDEX()         rseq_cpu_start()
+#endif
+
 struct rb {
     unsigned long head,
                   tail;
@@ -32,7 +43,7 @@ struct rb* g_rb_baseptr;
 // --  Operations  --
 static inline int rb_offer(void* const item_ptr) {
     // -  Index into per-CPU data structure (using the HW thread on which this SW thread is currently executing on) to get the data structure for the current HW thread
-    const unsigned int cpu = rseq_current_mm_cid();
+    const unsigned int cpu = RSEQ_GET_INDEX();
     struct rb* const rb_ptr = (struct rb*)((uintptr_t)g_rb_baseptr + sizeof(*g_rb_baseptr) * cpu);
 
     __asm__ __volatile__ goto (
@@ -46,8 +57,8 @@ static inline int rb_offer(void* const item_ptr) {
 
         // Check whether `mm_cid` still matches  (!!  clobbers rax  !!)
         RSEQ_ASM_CMP_CPU_ID(cpu_id,
-                            RSEQ_ASM_TP_SEGMENT:RSEQ_MM_CID_OFFSET(%[rseq_offset]),  /* `mm_cid` in `struct rseq` (contains current 'HW thread') */
-                            4f)                                                      /* Forward reference to abort handler (`abort_ip`) which will be invoked if no match */
+                            RSEQ_ASM_TP_SEGMENT:RSEQ_CPU_ID_FIELD_OFFSET(%[rseq_offset]),  /* `mm_cid` in `struct rseq` (contains current 'HW thread') */
+                            4f)                                                            /* Forward reference to abort handler (`abort_ip`) which will be invoked if no match */
 
         // -  BEGIN CS  -
         // - Prepare  (copy item)
@@ -101,7 +112,7 @@ block:
 
 
 int rb_poll(void** const item_ptr) {
-    const unsigned int cpu = rseq_current_mm_cid();
+    const unsigned int cpu = RSEQ_GET_INDEX();
     struct rb* const rb_ptr = (struct rb*)((uintptr_t)g_rb_baseptr + sizeof(*g_rb_baseptr) * cpu);
 
     /* NOTE: This is a MPSC rb implementation
@@ -129,6 +140,15 @@ int main(void) {
 // setup
     g_rb_baseptr = DIE_WHEN_ERRNO_VPTR( malloc(DIE_WHEN_ERR( system_get_ncpus(0) ) * sizeof(*g_rb_baseptr)) );
     DIE_WHEN_ERR( rseq_register_current_thread() );
+
+#if RSEQ_USE_CID
+    puts("Index: `mm_cid`");
+    if (! rseq_mm_cid_available()) {                                    // Make sure kernel supports `mm_cid`
+        LOG_ERROR_AND_DIE("Current kernel doesn't support `mm_cid`");
+    }
+#else
+    puts("Index: `cpu_start`");
+#endif
 
 
 // --  UNIT TESTs  --

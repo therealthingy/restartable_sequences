@@ -63,7 +63,7 @@ list(REMOVE_ITEM CMAKE_REQUIRED_DEFINITIONS -D_GNU_SOURCE)
 add_compile_options(-DHAVE_SCHED_GETAFFINITY=$<BOOL:${HAVE_SCHED_GETAFFINITY}>)
 
 
-include_directories(src/include/)        # Own error handling macros, etc.
+include_directories(src/include/)                        # Own error handling macros, etc.
 
 
 # -----------------------------------------------------------------------------
